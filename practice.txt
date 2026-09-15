@@ -1,0 +1,35 @@
+#example1
+
+{
+    "task": {
+        "title": "Learn FastAPI"
+    }
+}
+
+class Task(BaseModel):
+    title : str
+class Taskrequest(BaseModel):
+    task:Task
+
+@app.post("/tasks")
+def create_task(task:Taskrequest)->dict[str,str]:
+    return {
+        "message": "Task created",
+        "title":task.title
+    }
+
+#example 2
+
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+@app.post("/tasks")
+async def create_task(request: Request):
+    data = await request.json()
+
+    title = data["title"]
+
+    return {
+        "title": title
+    }
