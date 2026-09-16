@@ -710,12 +710,724 @@ The most important things learned in Module 3:
 
 ---
 
+# Module 4 — Database Integration with SQLite & SQLAlchemy
+
+## What We Learned
+
+In this module, we replaced the in-memory Python list with a real SQLite database using SQLAlchemy.
+
+Before:
+
+```text
+FastAPI
+   ↓
+storage.py
+   ↓
+Python list
+```
+
+After:
+
+```text
+FastAPI
+   ↓
+SQLAlchemy Session
+   ↓
+Engine
+   ↓
+SQLite
+   ↓
+taskflow.db
+```
+
+---
+
+## 1. SQLite
+
+SQLite is a database engine that stores the database in a file.
+
+Our database URL:
+
+```python
+DATABASE_URL = "sqlite:///./taskflow.db"
+```
+
+This means:
+
+- `sqlite` → use SQLite
+- `./taskflow.db` → database file in the current project directory
+
+Unlike databases such as PostgreSQL, SQLite does not normally require a separate database server.
+
+---
+
+## 2. SQLAlchemy
+
+SQLAlchemy is a Python library that allows us to work with databases using Python objects and SQL.
+
+We use its ORM (Object Relational Mapper).
+
+ORM allows us to represent database tables using Python classes.
+
+Example:
+
+```python
+class Task(Base):
+    __tablename__ = "tasks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String)
+    completed: Mapped[bool] = mapped_column(Boolean)
+```
+
+This represents the `tasks` database table.
+
+Conceptually:
+
+```text
+Python class       → Database table
+Python attribute   → Database column
+Python object      → Database row
+```
+
+---
+
+## 3. Engine
+
+```python
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False}
+)
+```
+
+The SQLAlchemy Engine is the central database connectivity manager.
+
+It knows:
+
+- which database to connect to
+- which database dialect to use
+- how to obtain database connections
+
+The Engine also manages the connection pool.
+
+---
+
+## 4. `check_same_thread=False`
+
+SQLite's Python driver normally restricts a database connection to the thread that created it.
+
+We use:
+
+```python
+connect_args={"check_same_thread": False}
+```
+
+to disable that restriction.
+
+This does **not** mean:
+
+- SQLite creates multiple connections
+- Sessions become thread-safe
+- one Session should be shared between requests
+
+We still use a separate SQLAlchemy Session for each request/unit of work.
+
+---
+
+## 5. `sessionmaker`
+
+```python
+SessionLocal = sessionmaker(bind=engine)
+```
+
+`SessionLocal` is a Session factory.
+
+Calling:
+
+```python
+db = SessionLocal()
+```
+
+creates an actual SQLAlchemy `Session`.
+
+The Session is used for database operations:
+
+```python
+db.add(...)
+db.get(...)
+db.delete(...)
+db.commit()
+db.refresh(...)
+```
+
+---
+
+## 6. Database Session Dependency
+
+We created:
+
+```python
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+`yield` allows FastAPI to:
+
+1. create the Session
+2. give the Session to the route
+3. wait for the route to finish
+4. resume the dependency
+5. close the Session
+
+Routes use it with:
+
+```python
+db = Depends(get_db)
+```
+
+Flow:
+
+```text
+Request
+   ↓
+Depends(get_db)
+   ↓
+SessionLocal()
+   ↓
+yield db
+   ↓
+Route receives db
+   ↓
+Route finishes
+   ↓
+finally
+   ↓
+db.close()
+```
+
+`try/finally` is used for cleanup. `finally` runs even if an exception occurs.
+
+---
+
+## 7. SQLAlchemy Model vs Pydantic Schema
+
+We have two different `Task` classes.
+
+### Pydantic `Task`
+
+Used for API validation and responses:
+
+```python
+from schemas import Task
+```
+
+### SQLAlchemy `Task`
+
+Used for database operations:
+
+```python
+from models import Task as TaskModel
+```
+
+We use the alias because both classes are named `Task`.
+
+Example:
+
+```python
+response_model=Task
+```
+
+means the Pydantic schema.
+
+While:
+
+```python
+db.get(TaskModel, task_id)
+```
+
+means the SQLAlchemy ORM model.
+
+---
+
+## 8. Pydantic → ORM
+
+The conversion from the incoming Pydantic object to an ORM object is done manually.
+
+For example:
+
+```python
+db_task = TaskModel(
+    title=task.title,
+    completed=task.completed
+)
+```
+
+Flow:
+
+```text
+Client JSON
+    ↓
+TaskRequest
+    ↓
+TaskModel
+    ↓
+Database
+```
+
+Pydantic and SQLAlchemy have different responsibilities, so we explicitly create the ORM object.
+
+---
+
+## 9. ORM → Pydantic Response
+
+For responses, we can return the ORM object:
+
+```python
+return db_task
+```
+
+FastAPI/Pydantic handles the response serialization when the response model is configured appropriately.
+
+Flow:
+
+```text
+Database
+    ↓
+SQLAlchemy ORM object
+    ↓
+FastAPI/Pydantic
+    ↓
+JSON response
+```
+
+---
+
+# CRUD Operations
+
+## 10. CREATE — POST `/tasks`
+
+We use:
+
+```python
+db_task = TaskModel(
+    title=task.title,
+    completed=task.completed
+)
+
+db.add(db_task)
+db.commit()
+db.refresh(db_task)
+
+return db_task
+```
+
+### `db.add()`
+
+Adds the ORM object to the Session's pending work.
+
+It does not permanently save the object yet.
+
+### `db.commit()`
+
+Commits the pending change to the database.
+
+### `db.refresh()`
+
+Reloads the object's current values from the database.
+
+This is especially useful after inserting because the database generates the primary-key ID.
+
+Before insertion:
+
+```text
+db_task.id → None
+```
+
+After the database generates the ID and the object is refreshed:
+
+```text
+db_task.id → 2
+```
+
+The important sequence is:
+
+```text
+db.add()
+   ↓
+db.commit()
+   ↓
+db.refresh()
+```
+
+---
+
+## 11. READ ALL — GET `/tasks`
+
+We use:
+
+```python
+return db.query(TaskModel).all()
+```
+
+This retrieves all rows from the `tasks` table as SQLAlchemy ORM objects.
+
+---
+
+## 12. READ ONE — GET `/tasks/{task_id}`
+
+We use:
+
+```python
+db_task = db.get(TaskModel, task_id)
+```
+
+This retrieves a task by its primary key.
+
+If the task does not exist:
+
+```python
+if db_task is None:
+    raise HTTPException(
+        status_code=404,
+        detail="Task not found"
+    )
+```
+
+Then:
+
+```python
+return db_task
+```
+
+---
+
+## 13. UPDATE — PUT `/tasks/{task_id}`
+
+PUT replaces the complete task.
+
+```python
+db_task = db.get(TaskModel, task_id)
+
+if db_task is None:
+    raise HTTPException(
+        status_code=404,
+        detail="Task not found"
+    )
+
+db_task.title = updated.title
+db_task.completed = updated.completed
+
+db.commit()
+db.refresh(db_task)
+
+return db_task
+```
+
+Both fields are updated because `TaskRequest` represents the complete task.
+
+---
+
+## 14. PARTIAL UPDATE — PATCH `/tasks/{task_id}`
+
+PATCH updates only the fields supplied by the client.
+
+```python
+if updated.title is not None:
+    db_task.title = updated.title
+
+if updated.completed is not None:
+    db_task.completed = updated.completed
+```
+
+Then:
+
+```python
+db.commit()
+db.refresh(db_task)
+
+return db_task
+```
+
+Example:
+
+```json
+{
+  "title": "Learn SQLAlchemy"
+}
+```
+
+Only `title` is changed.
+
+---
+
+## 15. DELETE — DELETE `/tasks/{task_id}`
+
+We first retrieve the ORM object:
+
+```python
+db_task = db.get(TaskModel, task_id)
+```
+
+Then check whether it exists:
+
+```python
+if db_task is None:
+    raise HTTPException(
+        status_code=404,
+        detail="Task not found"
+    )
+```
+
+Then:
+
+```python
+db.delete(db_task)
+db.commit()
+
+return {"message": "Task deleted"}
+```
+
+### `db.delete()`
+
+Marks the ORM object for deletion in the Session.
+
+### `db.commit()`
+
+Actually commits the deletion to the database.
+
+We don't need `refresh()` because we are not returning the deleted object.
+
+---
+
+# Important Session Operations
+
+```text
+db.add(object)
+    → stage an object for insertion
+
+db.get(Model, id)
+    → retrieve an object by primary key
+
+db.delete(object)
+    → mark an object for deletion
+
+db.commit()
+    → persist pending changes to the database
+
+db.refresh(object)
+    → reload current database values into the object
+```
+
+---
+
+# PUT vs PATCH
+
+### PUT
+
+Replaces the complete resource:
+
+```python
+db_task.title = updated.title
+db_task.completed = updated.completed
+```
+
+### PATCH
+
+Changes only supplied fields:
+
+```python
+if updated.title is not None:
+    db_task.title = updated.title
+
+if updated.completed is not None:
+    db_task.completed = updated.completed
+```
+
+---
+
+# `commit()` vs `refresh()`
+
+These operations have different purposes.
+
+### `commit()`
+
+```python
+db.commit()
+```
+
+Persists pending changes from the Session to the database.
+
+Conceptually:
+
+```text
+Python/Session
+      ↓
+   commit()
+      ↓
+  Database
+```
+
+### `refresh()`
+
+```python
+db.refresh(db_task)
+```
+
+Reloads the current database values into the Python ORM object.
+
+Conceptually:
+
+```text
+Database
+    ↓
+ refresh()
+    ↓
+Python ORM object
+```
+
+`refresh()` does not replace `commit()`.
+
+---
+
+# Primary Key Generation
+
+When we create a new ORM object:
+
+```python
+db_task = TaskModel(
+    title="sleep",
+    completed=True
+)
+```
+
+the ID is normally:
+
+```python
+db_task.id
+# None
+```
+
+because the database has not inserted the row yet.
+
+Then:
+
+```python
+db.add(db_task)
+db.commit()
+```
+
+the database generates the primary-key ID.
+
+For example:
+
+```text
+id = 2
+```
+
+After refreshing:
+
+```python
+db.refresh(db_task)
+
+print(db_task.id)
+# 2
+```
+
+So:
+
+```text
+TaskModel(...)
+    ↓
+id = None
+    ↓
+db.add()
+    ↓
+db.commit()
+    ↓
+database generates ID
+    ↓
+db.refresh()
+    ↓
+db_task.id = 2
+```
+
+---
+
+# Final Database Flow
+
+```text
+                   FastAPI
+                      ↓
+                Route Handler
+                      ↓
+               Depends(get_db)
+                      ↓
+                  Session
+                      ↓
+                   Engine
+                      ↓
+              Connection Pool
+                      ↓
+                 DBAPI/SQLite
+                      ↓
+                 taskflow.db
+```
+
+---
+
+# Final CRUD Pattern
+
+```text
+POST:
+db.add() → db.commit() → db.refresh()
+
+GET:
+db.get() / db.query()
+
+PUT:
+modify all fields → db.commit() → db.refresh()
+
+PATCH:
+modify supplied fields → db.commit() → db.refresh()
+
+DELETE:
+db.delete() → db.commit()
+```
+
+---
+
+# Project Cleanup
+
+The old `storage.py` in-memory storage is no longer needed.
+
+The database is now the source of truth.
+
+Before:
+
+```text
+routes → storage.py → Python list
+```
+
+After:
+
+```text
+routes → SQLAlchemy Session → SQLite → taskflow.db
+```
+
+## The complete CRUD API is now database-backed.
+
 ## Module Status
 
 - ✅ Module 1 — FastAPI Fundamentals
 - ✅ Module 2 — CRUD API
 - ✅ Module 3 — Project Structure & Code Organization
-- 🚧 Module 4 — Coming next
+- ✅ Module 4 — replacing in memory storage with database
+- 🚧 Module 5
 
 # Running the Project
 
