@@ -1419,7 +1419,985 @@ After:
 routes → SQLAlchemy Session → SQLite → taskflow.db
 ```
 
-## The complete CRUD API is now database-backed.
+---
+
+# Module 5 — SQLAlchemy Relationships & Advanced Queries
+
+## Overview
+
+In Module 5, TaskFlow was extended from a simple task database into a relational application.
+
+We learned:
+
+- One-to-many relationships
+- Foreign keys
+- SQLAlchemy `relationship()`
+- `back_populates`
+- Creating related records
+- Navigating relationships
+- Nested API responses
+- Cascade behavior
+- Database constraints
+- Filtering queries
+- Ordering and limiting
+- Advanced SQLAlchemy queries
+- `scalars()`, `all()`, and `scalar_one_or_none()`
+- Lazy loading
+- Eager loading
+- `selectinload()`
+- N+1 query problem
+- API organization and cleanup
+
+---
+
+# 1. One-to-Many Relationship
+
+TaskFlow has a one-to-many relationship:
+
+    User
+     ├── Task
+     ├── Task
+     └── Task
+
+One User can have many Tasks.
+
+Each Task belongs to one User.
+
+    User → one-to-many → Task
+    Task → many-to-one → User
+
+---
+
+# 2. Foreign Keys
+
+A foreign key connects a row in one table to a row in another table.
+
+In the `Task` model:
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id")
+    )
+
+This creates the relationship:
+
+    tasks.user_id → users.id
+
+Example:
+
+    users
+    +----+----------+
+    | id | name     |
+    +----+----------+
+    | 1  | Varunsai |
+    +----+----------+
+
+    tasks
+    +----+---------+---------+
+    | id | title   | user_id |
+    +----+---------+---------+
+    | 1  | Eating  | 1       |
+    | 2  | Study   | 1       |
+    +----+---------+---------+
+
+Both tasks belong to User 1.
+
+---
+
+# 3. SQLAlchemy `relationship()`
+
+The foreign key connects the database tables.
+
+`relationship()` connects the related SQLAlchemy objects.
+
+Task model:
+
+    user: Mapped["User"] = relationship(
+        back_populates="tasks"
+    )
+
+User model:
+
+    tasks: Mapped[list["Task"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+
+Now SQLAlchemy understands:
+
+    User.tasks
+    Task.user
+
+---
+
+# 4. `back_populates`
+
+`back_populates` connects both sides of the relationship.
+
+    # User
+    tasks = relationship(back_populates="user")
+
+    # Task
+    user = relationship(back_populates="tasks")
+
+This creates a two-way relationship:
+
+    User.tasks
+         ↕
+    Task.user
+
+For example:
+
+    user.tasks
+
+returns the user's tasks.
+
+And:
+
+    task.user
+
+returns the task's user.
+
+---
+
+# 5. Creating Related Records
+
+TaskFlow creates tasks through their user.
+
+Endpoint:
+
+    POST /users/{user_id}/tasks
+
+First, find the user:
+
+    db_user = db.get(User, user_id)
+
+    if db_user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="user not found"
+        )
+
+Create the task:
+
+    db_task = Task(
+        title=task.title,
+        completed=task.completed
+    )
+
+Attach it to the user's task collection:
+
+    db_user.tasks.append(db_task)
+
+SQLAlchemy handles the relationship and foreign key.
+
+We do not need to manually set:
+
+    db_task.user_id = user_id
+
+when using the relationship.
+
+---
+
+# 6. Navigating Relationships
+
+User → Tasks:
+
+    db_user.tasks
+
+Task → User:
+
+    db_task.user
+
+Relationship navigation:
+
+    User.tasks
+        ↓
+      Tasks
+
+    Task.user
+        ↓
+       User
+
+---
+
+# 7. Nested API Responses
+
+Because a User has Tasks, the User response schema can contain nested tasks.
+
+    class User(BaseModel):
+        id: int
+        name: str
+        tasks: list[Task]
+
+        model_config = ConfigDict(
+            from_attributes=True
+        )
+
+Example response:
+
+    {
+      "id": 1,
+      "name": "Varunsai",
+      "tasks": [
+        {
+          "id": 1,
+          "title": "Eating",
+          "completed": false
+        },
+        {
+          "id": 2,
+          "title": "Study",
+          "completed": true
+        }
+      ]
+    }
+
+This is called a nested response.
+
+---
+
+# 8. `from_attributes=True`
+
+For ORM-backed response schemas:
+
+    model_config = ConfigDict(
+        from_attributes=True
+    )
+
+This allows Pydantic to read values directly from SQLAlchemy model attributes.
+
+For example:
+
+    Task.model_validate(db_task)
+
+can read:
+
+    db_task.id
+    db_task.title
+    db_task.completed
+
+Request schemas do not need `from_attributes=True`.
+
+---
+
+# 9. Cascade Behavior
+
+The User relationship contains:
+
+    cascade="all, delete-orphan"
+
+The important behavior for TaskFlow is:
+
+    Delete User
+         ↓
+    Delete user's Tasks
+
+Example:
+
+    User 5
+     ├── Task 5
+     └── Task 6
+
+    Delete User 5
+
+         ↓
+
+    User 5 deleted
+    Task 5 deleted
+    Task 6 deleted
+
+This behavior was tested through the API.
+
+The cascade is configured on:
+
+    User.tasks
+
+because User is the parent.
+
+We do not want:
+
+    Delete Task
+         ↓
+    Delete User
+
+Deleting a Task should not delete its parent User.
+
+---
+
+# 10. `delete-orphan`
+
+`delete-orphan` handles child objects that are removed from an ownership relationship.
+
+The idea is:
+
+    Parent owns Child
+
+If the child becomes an orphan, SQLAlchemy can delete it.
+
+Syntax:
+
+    cascade="all, delete-orphan"
+
+---
+
+# 11. Database Constraints
+
+Database constraints protect data integrity.
+
+## Primary Key
+
+    id: Mapped[int] = mapped_column(
+        primary_key=True
+    )
+
+A primary key uniquely identifies a row.
+
+Example:
+
+    Task 1
+    Task 2
+    Task 3
+
+Each task has its own ID.
+
+## Foreign Key
+
+    ForeignKey("users.id")
+
+Connects a Task to a User:
+
+    tasks.user_id → users.id
+
+## Unique
+
+    name: Mapped[str] = mapped_column(
+        String,
+        unique=True
+    )
+
+Prevents duplicate values.
+
+For TaskFlow, two users cannot have the same name.
+
+## Nullable
+
+    nullable=False
+
+means the database column cannot contain `NULL`.
+
+Example:
+
+    name: Mapped[str] = mapped_column(
+        String,
+        unique=True,
+        nullable=False
+    )
+
+---
+
+# 12. Filtering Queries
+
+`where()` adds filtering conditions.
+
+Example:
+
+    statement = select(Task).where(
+        Task.completed == True
+    )
+
+This means:
+
+    Give me tasks where completed is True.
+
+TaskFlow provides:
+
+    GET /tasks/completed
+
+---
+
+# 13. Combining Conditions
+
+Multiple conditions passed to `where()` are combined using `AND`.
+
+Example:
+
+    statement = select(Task).where(
+        Task.user_id == 3,
+        Task.completed == False
+    )
+
+This means:
+
+    user_id = 3
+    AND
+    completed = false
+
+SQLAlchemy also provides:
+
+    and_()
+    or_()
+
+for more complex conditions.
+
+---
+
+# 14. Ordering Results
+
+`order_by()` controls the order of returned rows.
+
+Example:
+
+    Task.id.desc()
+
+means:
+
+    highest ID → lowest ID
+
+Example:
+
+    statement = (
+        select(Task)
+        .order_by(Task.id.desc())
+    )
+
+---
+
+# 15. Limiting Results
+
+`limit()` controls how many rows are returned.
+
+Example:
+
+    statement = (
+        select(Task)
+        .order_by(Task.id.desc())
+        .limit(3)
+    )
+
+This means:
+
+    Sort by ID descending
+            ↓
+    Return only 3 tasks
+
+TaskFlow provides:
+
+    GET /tasks/latest?limit=3
+
+Note:
+
+`id.desc()` gives the highest IDs first. It is only a proxy for "latest" when IDs correlate with creation order.
+
+---
+
+# 16. `select()`
+
+SQLAlchemy's `select()` builds a database query.
+
+Example:
+
+    statement = select(Task)
+
+This describes what we want to retrieve.
+
+It does not execute the query yet.
+
+---
+
+# 17. `db.execute()`
+
+After creating a statement:
+
+    statement = select(Task)
+
+we execute it:
+
+    result = db.execute(statement)
+
+The flow is:
+
+    select()
+       ↓
+    Build SQL statement
+       ↓
+    db.execute()
+       ↓
+    Execute query
+       ↓
+    result
+
+---
+
+# 18. `scalars()`
+
+When selecting one main value or ORM object:
+
+    statement = select(Task)
+
+we commonly use:
+
+    result.scalars().all()
+
+Example:
+
+    statement = select(Task)
+
+    result = db.execute(statement)
+
+    tasks = result.scalars().all()
+
+`scalars()` extracts the first selected value from each result row.
+
+---
+
+# 19. `all()`
+
+When selecting multiple columns:
+
+    statement = select(
+        Task.title,
+        Task.completed
+    )
+
+the result contains SQLAlchemy `Row` objects.
+
+We can use:
+
+    result.all()
+
+Example:
+
+    result = db.execute(statement)
+
+    rows = result.all()
+
+The rows contain the selected values.
+
+---
+
+# 20. `scalar_one_or_none()`
+
+Use this when the query should return zero or one result.
+
+Example:
+
+    result = db.execute(statement)
+
+    db_user = result.scalar_one_or_none()
+
+Possible results:
+
+    User found
+        ↓
+    User object
+
+    User not found
+        ↓
+    None
+
+If multiple results are returned when only one was expected, `scalar_one_or_none()` raises an error.
+
+---
+
+# 21. Choosing the Result Method
+
+## Query returns many ORM objects
+
+    select(Task)
+
+Use:
+
+    result.scalars().all()
+
+Possible result:
+
+    []
+
+or:
+
+    [task1, task2, task3]
+
+## Query returns zero or one object
+
+    select(User).where(User.id == user_id)
+
+Use:
+
+    result.scalar_one_or_none()
+
+## Query selects multiple columns
+
+    select(Task.title, Task.completed)
+
+Use:
+
+    result.all()
+
+---
+
+# 22. SQLAlchemy to SQL
+
+SQLAlchemy Python expressions are translated into SQL.
+
+Example:
+
+    statement = (
+        select(Task.id, Task.title)
+        .where(Task.user_id == 3)
+        .order_by(Task.id.desc())
+        .limit(3)
+    )
+
+Conceptually similar SQL:
+
+    SELECT tasks.id, tasks.title
+    FROM tasks
+    WHERE tasks.user_id = 3
+    ORDER BY tasks.id DESC
+    LIMIT 3;
+
+The Python code describes the query, and SQLAlchemy generates the SQL.
+
+---
+
+# 23. Lazy Loading
+
+With a relationship:
+
+    db_user = db.get(User, user_id)
+
+the User is loaded first.
+
+When we later access:
+
+    db_user.tasks
+
+SQLAlchemy can load the related tasks at that point.
+
+This is lazy loading.
+
+Conceptually:
+
+    Load User
+        ↓
+    Later access user.tasks
+        ↓
+    Load Tasks
+
+---
+
+# 24. Eager Loading
+
+Eager loading loads related data as part of the query strategy.
+
+TaskFlow uses:
+
+    from sqlalchemy.orm import selectinload
+
+Example:
+
+    statement = (
+        select(User)
+        .options(selectinload(User.tasks))
+        .where(User.id == user_id)
+    )
+
+Now the tasks are loaded eagerly.
+
+---
+
+# 25. `selectinload()`
+
+`selectinload()` generally uses a separate query to load related records in batches.
+
+For multiple users, instead of repeatedly querying tasks:
+
+    Query Users
+
+    Query Tasks for User 1
+    Query Tasks for User 2
+    Query Tasks for User 3
+
+`selectinload()` can batch the task loading:
+
+    Query Users
+
+    Query Tasks
+    WHERE user_id IN (1, 2, 3)
+
+This helps avoid the N+1 query problem.
+
+---
+
+# 26. N+1 Query Problem
+
+Suppose we load 3 users and then access each user's tasks separately.
+
+A lazy-loading pattern can result in approximately:
+
+    1 query → users
+
+    3 queries → tasks for each user
+
+    Total = 4 queries
+
+With `selectinload()`:
+
+    1 query → users
+
+    1 query → all related tasks
+
+    Total = 2 queries
+
+The exact number of queries depends on the loading strategy and query.
+
+---
+
+# 27. Final TaskFlow Models
+
+    class Task(Base):
+        __tablename__ = "tasks"
+
+        id: Mapped[int] = mapped_column(
+            primary_key=True
+        )
+
+        title: Mapped[str] = mapped_column(
+            String
+        )
+
+        completed: Mapped[bool] = mapped_column(
+            Boolean
+        )
+
+        user_id: Mapped[int] = mapped_column(
+            ForeignKey("users.id")
+        )
+
+        user: Mapped["User"] = relationship(
+            back_populates="tasks"
+        )
+
+
+    class User(Base):
+        __tablename__ = "users"
+
+        id: Mapped[int] = mapped_column(
+            primary_key=True
+        )
+
+        name: Mapped[str] = mapped_column(
+            String,
+            unique=True,
+            nullable=False
+        )
+
+        tasks: Mapped[list["Task"]] = relationship(
+            back_populates="user",
+            cascade="all, delete-orphan"
+        )
+
+---
+
+# 28. Final TaskFlow Schemas
+
+    from pydantic import BaseModel, ConfigDict
+
+
+    class TaskRequest(BaseModel):
+        title: str
+        completed: bool
+
+
+    class Task(BaseModel):
+        id: int
+        title: str
+        completed: bool
+
+        model_config = ConfigDict(
+            from_attributes=True
+        )
+
+
+    class TaskUpdate(BaseModel):
+        title: str | None = None
+        completed: bool | None = None
+
+
+    class UserRequest(BaseModel):
+        name: str
+
+
+    class User(BaseModel):
+        id: int
+        name: str
+        tasks: list[Task]
+
+        model_config = ConfigDict(
+            from_attributes=True
+        )
+
+---
+
+# 29. Final API
+
+## User Endpoints
+
+    POST   /users
+    POST   /users/{user_id}/tasks
+
+    GET    /users/{user_id}
+    GET    /users/{user_id}/tasks
+
+    DELETE /users/{user_id}
+
+## Task Endpoints
+
+    GET    /tasks
+    GET    /tasks/{task_id}
+
+    PUT    /tasks/{task_id}
+    PATCH  /tasks/{task_id}
+    DELETE /tasks/{task_id}
+
+    GET    /tasks/latest
+    GET    /tasks/completed
+
+The old standalone endpoint:
+
+    POST /tasks
+
+was removed because Tasks now belong to Users.
+
+Task creation is done through:
+
+    POST /users/{user_id}/tasks
+
+---
+
+# 30. Task ID vs User ID
+
+A Task has both:
+
+    task_id
+    user_id
+
+They have different purposes.
+
+## `task_id`
+
+Identifies a specific task.
+
+    PATCH /tasks/5
+
+means:
+
+    Modify Task 5.
+
+## `user_id`
+
+Identifies the owner.
+
+    GET /users/3/tasks
+
+means:
+
+    Get Tasks belonging to User 3.
+
+The database knows which user owns a task through:
+
+    tasks.user_id → users.id
+
+Later, authentication and authorization can verify whether the current user is allowed to modify a particular task.
+
+---
+
+# 31. Important Concepts to Remember
+
+    ForeignKey
+        ↓
+    Connects database tables
+
+    relationship()
+        ↓
+    Connects SQLAlchemy objects
+
+    back_populates
+        ↓
+    Connects both sides of a relationship
+
+    cascade
+        ↓
+    Propagates operations between related objects
+
+    where()
+        ↓
+    Filters results
+
+    order_by()
+        ↓
+    Sorts results
+
+    limit()
+        ↓
+    Limits results
+
+    select()
+        ↓
+    Builds a query
+
+    execute()
+        ↓
+    Runs the query
+
+    scalars().all()
+        ↓
+    Returns many single selected values/objects
+
+    all()
+        ↓
+    Returns SQLAlchemy Row objects for multiple selected columns
+
+    scalar_one_or_none()
+        ↓
+    Returns zero or one result
+
+    selectinload()
+        ↓
+    Eagerly loads relationships efficiently
+
+---
+
+# Module 5 Complete
+
+TaskFlow now has a proper relational database design:
+
+    User
+      │
+      │ one-to-many
+      ↓
+    Task
+
+The project now supports:
+
+- Relational database modeling
+- User → Task relationships
+- Foreign keys
+- SQLAlchemy relationships
+- Nested responses
+- Cascade deletion
+- Database constraints
+- Filtering
+- Ordering
+- Limiting
+- Advanced SQLAlchemy queries
+- Lazy loading
+- Eager loading
+- `selectinload()`
+- Full Task CRUD
+- User and User-Task operations
+
+Module 5 is complete.
 
 ## Module Status
 
@@ -1427,7 +2405,8 @@ routes → SQLAlchemy Session → SQLite → taskflow.db
 - ✅ Module 2 — CRUD API
 - ✅ Module 3 — Project Structure & Code Organization
 - ✅ Module 4 — replacing in memory storage with database
-- 🚧 Module 5
+- ✅ Module 5 - advanced database design and operations
+- 🚧 Module 6
 
 # Running the Project
 
