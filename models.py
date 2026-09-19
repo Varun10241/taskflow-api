@@ -13,4 +13,5 @@ class User(Base):
     __tablename__="users"
     id:Mapped[int]=mapped_column(primary_key=True)
     name:Mapped[str]=mapped_column(String,unique=True,nullable=False)
+    password_hash:Mapped[str]=mapped_column(String,nullable=False)
     tasks:Mapped[list["Task"]]=relationship(back_populates="user",cascade="all, delete-orphan")

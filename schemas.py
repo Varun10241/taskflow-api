@@ -4,7 +4,7 @@ class TaskRequest(BaseModel):
     title:str
     completed:bool
 
-class Task(BaseModel):
+class TaskResponse(BaseModel):
     id:int
     title:str
     completed:bool
@@ -16,9 +16,18 @@ class TaskUpdate(BaseModel):
 
 class UserRequest(BaseModel):
     name:str
+    password: str
 
-class User(BaseModel):
+class UserResponse(BaseModel):
     id:int
     name:str
-    tasks:list[Task]
+    tasks:list[TaskResponse]
     model_config=ConfigDict(from_attributes=True)
+
+class UserCreateResponse(BaseModel):
+    id:int
+    name:str
+
+class LoginRequest(BaseModel):
+    name: str
+    password: str

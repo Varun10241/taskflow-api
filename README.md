@@ -2399,6 +2399,625 @@ The project now supports:
 
 Module 5 is complete.
 
+---
+
+# Module 6 — Authentication & Authorization
+
+## 1. Authentication vs Authorization
+
+### Authentication
+
+Authentication answers:
+
+> Who is the user?
+
+Example: verifying a user's username and password during login.
+
+### Authorization
+
+Authorization answers:
+
+> What is the authenticated user allowed to do?
+
+Example: User 1 should not be able to update User 2's task.
+
+---
+
+## 2. Password Hashing
+
+Passwords should never be stored directly in the database.
+
+Instead:
+
+    Plain password
+          ↓
+    Password hashing
+          ↓
+    Password hash
+          ↓
+    Database
+
+We used `pwdlib`:
+
+    from pwdlib import PasswordHash
+
+    pwd_hash = PasswordHash.recommended()
+
+Hashing a password:
+
+    password_hash = pwd_hash.hash(user.password)
+
+Verifying a password:
+
+    pwd_hash.verify(
+        credentials.password,
+        db_user.password_hash
+    )
+
+Password hashes are not decrypted back into the original password. The password-hashing library verifies the supplied password against the stored hash.
+
+---
+
+## 3. User Registration
+
+`POST /users` creates a new user.
+
+The password is hashed before storing the user:
+
+    password_hash = pwd_hash.hash(user.password)
+
+    db_user = User(
+        name=user.name,
+        password_hash=password_hash
+    )
+
+The API does not expose the password hash.
+
+Response schema:
+
+    class UserCreateResponse(BaseModel):
+        id: int
+        name: str
+
+---
+
+## 4. Login
+
+Login endpoint:
+
+    POST /login
+
+Request:
+
+    {
+      "name": "Varun",
+      "password": "password"
+    }
+
+The server:
+
+1.  Finds the user by name.
+2.  Verifies the supplied password against the stored password hash.
+3.  Creates a JWT if the credentials are valid.
+4.  Returns the access token.
+
+    if pwd_hash.verify(credentials.password, db_user.password_hash):
+    access_token = create_access_token(db_user.id)
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer"
+        }
+
+Invalid credentials return:
+
+    401 Unauthorized
+
+---
+
+## 5. JWT
+
+We use JSON Web Tokens for authentication.
+
+A JWT contains three parts:
+
+    Header.Payload.Signature
+
+### Header
+
+Contains information such as the signing algorithm:
+
+    {
+      "alg": "HS256",
+      "typ": "JWT"
+    }
+
+### Payload
+
+Our token contains:
+
+    payload = {
+        "sub": str(user_id),
+        "iat": now,
+        "exp": now + timedelta(minutes=30)
+    }
+
+Important claims:
+
+- `sub` — identifies the user
+- `iat` — issued-at time
+- `exp` — expiration time
+
+The user ID is stored as a string in `sub`:
+
+    "sub": str(user_id)
+
+and converted back to an integer after decoding:
+
+    user_id = int(payload["sub"])
+
+### Signature
+
+The signature is generated using the secret key and HS256.
+
+JWTs are not encrypted. Their payload can be read.
+
+The signature provides integrity and authenticity, not confidentiality.
+
+---
+
+## 6. Secret Key
+
+The JWT secret key is stored in `.env`:
+
+    SECRET_KEY=...
+
+`.env` is added to `.gitignore`:
+
+    .env
+
+We load it using:
+
+    from dotenv import load_dotenv
+    import os
+
+    load_dotenv()
+
+    SECRET_KEY = os.getenv("SECRET_KEY")
+
+The secret key should never be committed to Git.
+
+---
+
+## 7. Creating an Access Token
+
+We created:
+
+    def create_access_token(user_id: int) -> str:
+        now = datetime.now(timezone.utc)
+
+        payload = {
+            "sub": str(user_id),
+            "iat": now,
+            "exp": now + timedelta(minutes=30)
+        }
+
+        token = jwt.encode(
+            payload,
+            SECRET_KEY,
+            algorithm="HS256"
+        )
+
+        return token
+
+`exp` limits how long the token remains valid.
+
+PyJWT automatically checks the expiration when decoding the token.
+
+---
+
+## 8. Decoding and Validating JWT
+
+We created:
+
+    def decode_access_token(token: str):
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=["HS256"]
+        )
+
+        return payload
+
+Invalid or expired tokens cause JWT validation errors.
+
+We catch those errors and return:
+
+    401 Unauthorized
+
+---
+
+## 9. OAuth2PasswordBearer
+
+FastAPI provides:
+
+    from fastapi.security import OAuth2PasswordBearer
+
+    oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+It extracts the bearer token from:
+
+    Authorization: Bearer <JWT>
+
+Important:
+
+`OAuth2PasswordBearer` extracts the token. It does not itself verify the JWT.
+
+JWT verification happens inside our `decode_access_token()` function.
+
+---
+
+## 10. get_current_user() Dependency
+
+We created a reusable authentication dependency:
+
+    def get_current_user(
+        token: str = Depends(oauth2_scheme),
+        db=Depends(get_db)
+    ):
+        try:
+            payload = decode_access_token(token)
+            user_id = int(payload["sub"])
+        except (jwt.InvalidTokenError, KeyError, ValueError):
+            raise HTTPException(
+                status_code=401,
+                detail="invalid authentication credentials"
+            )
+
+        db_user = db.get(User, user_id)
+
+        if db_user is None:
+            raise HTTPException(
+                status_code=401,
+                detail="user not found"
+            )
+
+        return db_user
+
+The flow is:
+
+    Authorization header
+            ↓
+    oauth2_scheme
+            ↓
+    JWT token
+            ↓
+    decode_access_token()
+            ↓
+    user_id
+            ↓
+    database lookup
+            ↓
+    User object
+            ↓
+    endpoint
+
+---
+
+## 11. Protected Endpoints
+
+An endpoint becomes authenticated by using:
+
+    current_user: User = Depends(get_current_user)
+
+For example:
+
+    @router.get("/tasks/{task_id}", response_model=TaskResponse)
+    def read_task(
+        task_id: int,
+        db=Depends(get_db),
+        current_user: User = Depends(get_current_user)
+    ):
+        ...
+
+If the request has no valid JWT, authentication fails before the endpoint executes.
+
+---
+
+## 12. /users/me
+
+`/users/me` represents the currently authenticated user.
+
+Get the current user:
+
+    @router.get("/users/me", response_model=UserResponse)
+    def read_current_user(
+        current_user: User = Depends(get_current_user)
+    ):
+        return current_user
+
+Delete the current user:
+
+    @router.delete("/users/me", response_model=dict[str, str])
+    def delete_user(
+        db=Depends(get_db),
+        current_user: User = Depends(get_current_user)
+    ) -> dict[str, str]:
+
+        db.delete(current_user)
+        db.commit()
+
+        return {"message": "user deleted"}
+
+The client does not need to provide a user ID because the JWT identifies the user.
+
+---
+
+## 13. 401 vs 403
+
+### 401 Unauthorized
+
+The request is not successfully authenticated.
+
+Examples:
+
+- No token
+- Invalid token
+- Expired token
+- Invalid username/password
+
+Example:
+
+    raise HTTPException(
+        status_code=401,
+        detail="invalid authentication credentials"
+    )
+
+### 403 Forbidden
+
+The user is authenticated but is not allowed to access the requested resource.
+
+Example:
+
+    if db_task.user_id != current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="forbidden"
+        )
+
+---
+
+## 14. Task Ownership
+
+For individual task operations, we check that the authenticated user owns the task:
+
+    if db_task.user_id != current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="forbidden"
+        )
+
+This protects:
+
+    GET    /tasks/{task_id}
+    PUT    /tasks/{task_id}
+    PATCH  /tasks/{task_id}
+    DELETE /tasks/{task_id}
+
+---
+
+## 15. Filtering Tasks by Authenticated User
+
+For collection endpoints, we filter directly in the database query.
+
+Example:
+
+    statement = (
+        select(Task)
+        .where(Task.user_id == current_user.id)
+    )
+
+This means the database only returns tasks belonging to the authenticated user.
+
+### Latest tasks
+
+    statement = (
+        select(Task)
+        .where(Task.user_id == current_user.id)
+        .order_by(Task.id.desc())
+        .limit(limit)
+    )
+
+### Completed tasks
+
+    statement = select(Task).where(
+        Task.user_id == current_user.id,
+        Task.completed == True
+    )
+
+---
+
+## 16. Creating Tasks with the Authenticated User
+
+Previously we had:
+
+    POST /users/{user_id}/tasks
+
+We changed this to:
+
+    POST /tasks
+
+The client does not specify the owner.
+
+    @router.post("/tasks", response_model=TaskResponse)
+    def create_task(
+        task: TaskRequest,
+        db=Depends(get_db),
+        current_user: User = Depends(get_current_user)
+    ) -> TaskResponse:
+
+        db_task = Task(
+            title=task.title,
+            completed=task.completed
+        )
+
+        current_user.tasks.append(db_task)
+
+        db.commit()
+        db.refresh(db_task)
+
+        return db_task
+
+The relationship associates the new task with the authenticated user:
+
+    current_user.tasks.append(db_task)
+
+The authenticated user determines ownership.
+
+---
+
+## 17. Final Task API
+
+    POST   /tasks
+    GET    /tasks
+    GET    /tasks/{task_id}
+    GET    /tasks/latest
+    GET    /tasks/completed
+    PUT    /tasks/{task_id}
+    PATCH  /tasks/{task_id}
+    DELETE /tasks/{task_id}
+
+Task endpoints use authentication and ownership where appropriate.
+
+---
+
+## 18. Final User API
+
+    POST   /users
+    POST   /login
+    GET    /users/me
+    DELETE /users/me
+
+We removed these endpoints because they are unnecessary for our current private task-manager design:
+
+    GET  /users/{user_id}
+    GET  /users/{user_id}/tasks
+    POST /users/{user_id}/tasks
+    DELETE /users/{user_id}
+
+The authenticated user's identity comes from the JWT.
+
+---
+
+## 19. SQLAlchemy Query Building
+
+A complex query does not require multiple database queries just because it has multiple conditions.
+
+We can build one statement:
+
+    statement = (
+        select(Task.title, Task.completed)
+        .where(
+            Task.user_id == current_user.id,
+            Task.completed == True
+        )
+        .order_by(Task.id.desc())
+        .limit(5)
+    )
+
+The database is queried when we execute it:
+
+    result = db.execute(statement)
+
+Conceptually:
+
+    select()
+       ↓
+    where()
+       ↓
+    order_by()
+       ↓
+    limit()
+       ↓
+    execute()
+       ↓
+    ONE database query
+
+However, `get_current_user()` itself performs a database lookup to verify that the user exists.
+
+Therefore, an authenticated endpoint can involve:
+
+    Query 1 → authenticate/find current user
+    Query 2 → execute the actual business query
+
+If an endpoint only needs the user ID, a future optimization would be a dependency that validates the JWT and returns the user ID without querying the User table.
+
+---
+
+## 20. Complete Authentication Flow
+
+    REGISTER
+       ↓
+    POST /users
+       ↓
+    Hash password
+       ↓
+    Store user in database
+
+
+    LOGIN
+       ↓
+    POST /login
+       ↓
+    Verify password
+       ↓
+    Create JWT
+       ↓
+    Return access token
+
+
+    PROTECTED REQUEST
+       ↓
+    Authorization: Bearer JWT
+       ↓
+    oauth2_scheme
+       ↓
+    get_current_user()
+       ↓
+    Decode and verify JWT
+       ↓
+    Get user ID
+       ↓
+    Find user
+       ↓
+    current_user
+       ↓
+    Endpoint
+       ↓
+    Authorization / ownership check
+       ↓
+    Response
+
+---
+
+## Module 6 Key Takeaways
+
+- Authentication = **Who are you?**
+- Authorization = **What are you allowed to do?**
+- Never store plain-text passwords.
+- Password hashes are verified, not decrypted.
+- JWTs are signed, not encrypted.
+- `exp` controls token expiration.
+- JWT secrets should be stored outside the source code.
+- `OAuth2PasswordBearer` extracts the bearer token.
+- `get_current_user()` centralizes authentication logic.
+- `401` means authentication failed.
+- `403` means authentication succeeded but access is forbidden.
+- Task ownership is enforced using the authenticated user's ID.
+- Collection endpoints can filter data at the database level.
+- `/users/me` identifies the currently authenticated user.
+- The JWT can identify the owner, so clients do not need to send `user_id` for their own resources.
+
 ## Module Status
 
 - ✅ Module 1 — FastAPI Fundamentals
@@ -2406,7 +3025,8 @@ Module 5 is complete.
 - ✅ Module 3 — Project Structure & Code Organization
 - ✅ Module 4 — replacing in memory storage with database
 - ✅ Module 5 - advanced database design and operations
-- 🚧 Module 6
+- ✅ Module 6 - Authentication,JWT and Authorization
+- 🚧 Module 7
 
 # Running the Project
 

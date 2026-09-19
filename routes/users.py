@@ -1,58 +1,52 @@
 from fastapi import APIRouter,Depends,HTTPException
-from schemas import UserRequest,TaskRequest,Task as TaskResponse,User as UserResponse
+from schemas import UserRequest,UserResponse,UserCreateResponse,LoginRequest
 from database import get_db
-from models import User,Task
+from models import User
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
+from security import pwd_hash,create_access_token,get_current_user
 router=APIRouter()
-@router.post("/users")
-def create_user(user:UserRequest,db=Depends(get_db)):
+
+
+@router.get("/users/me",response_model=UserResponse)
+def read_current_user(current_user:User=Depends(get_current_user)):
+    return current_user
+
+@router.post("/users",response_model=UserCreateResponse)
+def create_user(user:UserRequest,db=Depends(get_db))->UserCreateResponse:
+    password_hash=pwd_hash.hash(user.password)
     db_user=User(
-        name=user.name
+        name=user.name,
+        password_hash=password_hash
     )
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
     return db_user
 
-@router.post("/users/{user_id}/tasks",response_model=TaskResponse)
-def create_user_task(user_id:int,task:TaskRequest,db=Depends(get_db))->TaskResponse:
-    db_user=db.get(User,user_id)
-    if db_user is None:
-        raise HTTPException(status_code=404,detail="user not found")
-    db_task=Task(
-        title=task.title,
-        completed=task.completed
-    )
-    db_user.tasks.append(db_task)
-    db.commit()
-    db.refresh(db_task)
-    return db_task
-
-@router.get("/users/{user_id}",response_model=UserResponse)
-def read_user(user_id:int,db=Depends(get_db)):
-    db_user=db.get(User,user_id)
-    if db_user is None:
-        raise HTTPException(status_code=404,detail="user not found")
-    return db_user
-
-@router.get("/users/{user_id}/tasks",response_model=list[TaskResponse])
-def read_user_tasks(user_id:int,db=Depends(get_db))->list[TaskResponse]:
-    statement=(select(User)
-    .options(selectinload(User.tasks))
-    .where(User.id==user_id)
+@router.post("/login")
+def login(credentials:LoginRequest,db=Depends(get_db))->dict[str,str]:
+    statement=(
+        select(User)
+        .where(User.name==credentials.name)
     )
     result=db.execute(statement)
     db_user=result.scalar_one_or_none()
     if db_user is None:
-        raise HTTPException(status_code=404,detail="user not found")
-    return db_user.tasks
+        raise HTTPException(status_code=401,detail="invalid credentials")
+    if pwd_hash.verify(credentials.password,db_user.password_hash):
+        access_token=create_access_token(db_user.id)
+        return{
+            "access_token":access_token,
+            "token_type":"bearer"
+        }
+    else:
+        raise HTTPException(status_code=401,detail="invalid credentials")
 
-@router.delete("/users/{user_id}",response_model=dict[str,str])
-def delete_user(user_id:int,db=Depends(get_db))->dict[str,str]:
-    db_user=db.get(User,user_id)
-    if db_user is None:
-        raise HTTPException(status_code=404,detail="user not found")
-    db.delete(db_user)
+
+@router.delete("/users/me",response_model=dict[str,str])
+def delete_user(db=Depends(get_db),current_user:User=Depends(get_current_user))->dict[str,str]:
+    
+    db.delete(current_user)
     db.commit()
     return {"message":"user deleted"}
+
